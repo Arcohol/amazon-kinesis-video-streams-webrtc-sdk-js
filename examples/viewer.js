@@ -39,6 +39,27 @@ let audioRateArray = [];
 let timeArray = [];
 let chartHeight = 0;
 
+const VIEWER_LIVE_DATA_WINDOW_MS = 60 * 1000;
+const VIEWER_LIVE_DATA_REFRESH_INTERVAL_MS = 1000;
+const VIEWER_LIVE_DATA_SERIES_PALETTE = [
+    {
+        borderColor: '#1565C0',
+        backgroundColor: 'rgba(21, 101, 192, 0.15)',
+    },
+    {
+        borderColor: '#EF6C00',
+        backgroundColor: 'rgba(239, 108, 0, 0.15)',
+    },
+    {
+        borderColor: '#2E7D32',
+        backgroundColor: 'rgba(46, 125, 50, 0.15)',
+    },
+    {
+        borderColor: '#6A1B9A',
+        backgroundColor: 'rgba(106, 27, 154, 0.15)',
+    },
+];
+
 let signalingSetUpTime = 0;
 let timeToSetUpViewerMedia = 0;
 let timeToFirstFrameFromOffer = 0;
@@ -256,6 +277,320 @@ let dataChannelLatencyCalcMessage = {
     'lastMessageFromViewerTs': ''
 }
 
+function getViewerLiveDataStatusElement() {
+    return document.getElementById('viewer-live-data-status');
+}
+
+function setViewerLiveDataStatus(message) {
+    const statusElement = getViewerLiveDataStatusElement();
+    if (statusElement) {
+        statusElement.textContent = message;
+    }
+}
+
+function formatViewerLiveDataTimestamp(timestamp, includeMilliseconds = false) {
+    const date = new Date(timestamp);
+    const formattedTime = date.toLocaleTimeString([], {
+        hour12: false,
+        minute: '2-digit',
+        second: '2-digit',
+    });
+
+    if (!includeMilliseconds) {
+        return formattedTime;
+    }
+
+    return `${formattedTime}.${String(date.getMilliseconds()).padStart(3, '0')}`;
+}
+
+function formatViewerLiveDataAxisLabel(value) {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? formatViewerLiveDataTimestamp(numericValue) : '';
+}
+
+function formatViewerLiveDataLatency(latencyMs) {
+    return `${Math.max(0, Math.round(latencyMs))} ms`;
+}
+
+function createEmptyViewerLiveDataHistory() {
+    return {};
+}
+
+function createEmptyViewerLiveDataSeries() {
+    return {};
+}
+
+function getViewerLiveDataSeriesIds() {
+    return viewer.liveDataSeries ? Object.keys(viewer.liveDataSeries) : [];
+}
+
+function createViewerLiveDataDataset(paramId, seriesConfig, data) {
+    return {
+        label: seriesConfig.label,
+        borderColor: seriesConfig.borderColor,
+        backgroundColor: seriesConfig.backgroundColor,
+        borderWidth: 2,
+        data,
+        fill: false,
+        parsing: false,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        spanGaps: true,
+    };
+}
+
+function ensureViewerLiveDataSeries(paramId) {
+    if (!viewer.liveDataSeries) {
+        viewer.liveDataSeries = createEmptyViewerLiveDataSeries();
+    }
+
+    if (!viewer.liveDataHistory) {
+        viewer.liveDataHistory = createEmptyViewerLiveDataHistory();
+    }
+
+    if (viewer.liveDataSeries[paramId]) {
+        return;
+    }
+
+    const paletteIndex = getViewerLiveDataSeriesIds().length % VIEWER_LIVE_DATA_SERIES_PALETTE.length;
+    const style = VIEWER_LIVE_DATA_SERIES_PALETTE[paletteIndex];
+    viewer.liveDataSeries[paramId] = {
+        label: paramId,
+        borderColor: style.borderColor,
+        backgroundColor: style.backgroundColor,
+    };
+    viewer.liveDataHistory[paramId] = [];
+}
+
+function getViewerLiveDataWindowEnd(referenceTime = Date.now()) {
+    const numericReferenceTime = Number(referenceTime);
+    const currentTime = Date.now();
+    const latestDataTimestamp = viewer.liveDataLatestTimestamp || 0;
+
+    return Math.max(
+        currentTime,
+        latestDataTimestamp,
+        Number.isFinite(numericReferenceTime) ? numericReferenceTime : currentTime,
+    );
+}
+
+function pruneViewerLiveDataHistory(referenceTime = Date.now()) {
+    if (!viewer.liveDataHistory) {
+        return;
+    }
+
+    const cutoff = referenceTime - VIEWER_LIVE_DATA_WINDOW_MS;
+    Object.keys(viewer.liveDataHistory).forEach((paramId) => {
+        viewer.liveDataHistory[paramId] = viewer.liveDataHistory[paramId].filter((point) => point.x >= cutoff);
+    });
+}
+
+function updateViewerLiveDataStatus(referenceTime = Date.now()) {
+    if (!viewer.liveDataHistory) {
+        setViewerLiveDataStatus('Waiting for timestamped data-channel measurements...');
+        return;
+    }
+
+    const latestPoints = Object.keys(viewer.liveDataHistory)
+        .map((paramId) => {
+            const points = viewer.liveDataHistory[paramId];
+            return points.length ? { paramId, point: points[points.length - 1] } : null;
+        })
+        .filter(Boolean);
+
+    if (!latestPoints.length) {
+        setViewerLiveDataStatus(
+            viewer.openDataChannelEnabled
+                ? 'Waiting for timestamped data-channel measurements...'
+                : 'Enable DataChannel to plot live measurements.',
+        );
+        return;
+    }
+
+    const latestValues = latestPoints
+        .map(({ paramId, point }) => `${paramId}: ${point.y} (${formatViewerLiveDataLatency(point.latencyMs || 0)})`)
+        .join(' | ');
+    setViewerLiveDataStatus(`Showing last 60 seconds. ${latestValues}. Updated ${formatViewerLiveDataTimestamp(referenceTime)}`);
+}
+
+function syncViewerLiveDataChart(referenceTime = Date.now()) {
+    if (!viewer.liveDataChart || !viewer.liveDataHistory || !viewer.liveDataSeries) {
+        return;
+    }
+
+    const windowEndTime = getViewerLiveDataWindowEnd(referenceTime);
+    pruneViewerLiveDataHistory(windowEndTime);
+
+    viewer.liveDataChart.data.datasets = getViewerLiveDataSeriesIds().map((paramId) =>
+        createViewerLiveDataDataset(paramId, viewer.liveDataSeries[paramId], viewer.liveDataHistory[paramId]),
+    );
+    viewer.liveDataChart.options.scales.x.min = windowEndTime - VIEWER_LIVE_DATA_WINDOW_MS;
+    viewer.liveDataChart.options.scales.x.max = windowEndTime;
+    viewer.liveDataChart.update('none');
+    updateViewerLiveDataStatus(windowEndTime);
+}
+
+function destroyViewerLiveDataChart() {
+    if (viewer.liveDataRefreshInterval) {
+        clearInterval(viewer.liveDataRefreshInterval);
+        viewer.liveDataRefreshInterval = null;
+    }
+
+    if (viewer.liveDataChart) {
+        viewer.liveDataChart.destroy();
+        viewer.liveDataChart = null;
+    }
+
+    viewer.liveDataHistory = null;
+    viewer.liveDataSeries = null;
+    viewer.liveDataLatestTimestamp = 0;
+    viewer.openDataChannelEnabled = false;
+    setViewerLiveDataStatus('Waiting for timestamped data-channel measurements...');
+}
+
+function initializeViewerLiveDataChart(openDataChannelEnabled) {
+    destroyViewerLiveDataChart();
+
+    viewer.openDataChannelEnabled = openDataChannelEnabled;
+    viewer.liveDataHistory = createEmptyViewerLiveDataHistory();
+    viewer.liveDataSeries = createEmptyViewerLiveDataSeries();
+    viewer.liveDataLatestTimestamp = 0;
+
+    const chartCanvas = document.getElementById('viewer-live-data-chart');
+    if (!chartCanvas) {
+        return;
+    }
+
+    const now = Date.now();
+    viewer.liveDataChart = new Chart(chartCanvas, {
+        type: 'line',
+        data: {
+            datasets: [],
+        },
+        options: {
+            animation: false,
+            maintainAspectRatio: false,
+            normalized: true,
+            responsive: true,
+            interaction: {
+                intersect: false,
+                mode: 'nearest',
+            },
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                },
+                tooltip: {
+                    callbacks: {
+                        title: (tooltipItems) => {
+                            if (!tooltipItems.length) {
+                                return '';
+                            }
+
+                            return `Timestamp ${formatViewerLiveDataTimestamp(tooltipItems[0].parsed.x, true)}`;
+                        },
+                        label: (tooltipItem) => {
+                            const rawPoint = tooltipItem.raw || {};
+                            const latencyText = Number.isFinite(rawPoint.latencyMs)
+                                ? formatViewerLiveDataLatency(rawPoint.latencyMs)
+                                : 'n/a';
+
+                            return `${tooltipItem.dataset.label}: ${tooltipItem.parsed.y} | Latency ${latencyText}`;
+                        },
+                    },
+                },
+            },
+            scales: {
+                x: {
+                    type: 'linear',
+                    min: now - VIEWER_LIVE_DATA_WINDOW_MS,
+                    max: now,
+                    title: {
+                        display: true,
+                        text: 'Message Time',
+                    },
+                    ticks: {
+                        callback: (value) => formatViewerLiveDataAxisLabel(value),
+                        maxTicksLimit: 6,
+                    },
+                },
+                y: {
+                    title: {
+                        display: true,
+                        text: 'Value',
+                    },
+                },
+            },
+        },
+    });
+
+    syncViewerLiveDataChart(now);
+    viewer.liveDataRefreshInterval = setInterval(() => syncViewerLiveDataChart(), VIEWER_LIVE_DATA_REFRESH_INTERVAL_MS);
+}
+
+function parseViewerLiveDataMessage(rawMessage, receivedTimestamp = Date.now()) {
+    let parsedMessage;
+    try {
+        parsedMessage = JSON.parse(rawMessage);
+    } catch (e) {
+        return null;
+    }
+
+    if (!parsedMessage || Array.isArray(parsedMessage) || typeof parsedMessage !== 'object') {
+        return null;
+    }
+
+    if (parsedMessage.paramId === undefined || parsedMessage.paramId === null) {
+        return null;
+    }
+
+    const paramId = String(parsedMessage.paramId);
+    if (!paramId.trim()) {
+        return null;
+    }
+
+    const value = Number(parsedMessage.value);
+    if (!Number.isFinite(value)) {
+        return null;
+    }
+
+    const timestamp = Number(parsedMessage.timestamp);
+    const normalizedTimestamp = Number.isFinite(timestamp) ? timestamp : receivedTimestamp;
+
+    return {
+        paramId,
+        value,
+        timestamp: normalizedTimestamp,
+        latencyMs: Math.max(0, receivedTimestamp - normalizedTimestamp),
+    };
+}
+
+function addViewerLiveDataPoint(rawMessage, receivedTimestamp = Date.now()) {
+    const liveDataPoint = parseViewerLiveDataMessage(rawMessage, receivedTimestamp);
+    if (!liveDataPoint || !viewer.liveDataHistory) {
+        return null;
+    }
+
+    ensureViewerLiveDataSeries(liveDataPoint.paramId);
+    viewer.liveDataHistory[liveDataPoint.paramId].push({
+        x: liveDataPoint.timestamp,
+        y: liveDataPoint.value,
+        latencyMs: liveDataPoint.latencyMs,
+    });
+    viewer.liveDataLatestTimestamp = Math.max(viewer.liveDataLatestTimestamp || 0, liveDataPoint.timestamp);
+
+    syncViewerLiveDataChart(liveDataPoint.timestamp);
+    return liveDataPoint;
+}
+
+function formatViewerRemoteDataMessage(rawMessage, liveDataPoint) {
+    if (!liveDataPoint) {
+        return rawMessage;
+    }
+
+    return `${rawMessage}\nLatency: ${formatViewerLiveDataLatency(liveDataPoint.latencyMs)}`;
+}
+
 async function startViewer(localView, remoteView, formValues, onStatsReport, remoteMessage) {
     try {
         console.log('[VIEWER] Client id is:', formValues.clientId);
@@ -267,6 +602,7 @@ async function startViewer(localView, remoteView, formValues, onStatsReport, rem
 
         viewer.localView = localView;
         viewer.remoteView = remoteView;
+        initializeViewerLiveDataChart(formValues.openDataChannel);
 
         viewer.loadedDataCallback = () => {
             metrics.viewer.ttff.endTime = Date.now();
@@ -592,8 +928,9 @@ async function startViewer(localView, remoteView, formValues, onStatsReport, rem
             };
             // Callback for the data channel created by viewer
             let onRemoteDataMessageViewer = (message) => {
-
-                remoteMessage.append(`${message.data}\n\n`);
+                const receivedTimestamp = Date.now();
+                const liveDataPoint = addViewerLiveDataPoint(message.data, receivedTimestamp);
+                remoteMessage.append(`${formatViewerRemoteDataMessage(message.data, liveDataPoint)}\n\n`);
                 if (formValues.enableProfileTimeline) {
 
                     // The datachannel first sends a message of the following format with firstMessageFromViewerTs attached,
@@ -668,6 +1005,7 @@ async function startViewer(localView, remoteView, formValues, onStatsReport, rem
 
             viewer.peerConnection.ondatachannel = event => {
                 // Callback for the data channel created by master
+                console.log('[VIEWER] Received data channel from master');
                 event.channel.onmessage = onRemoteDataMessageViewer;
             };
         }
@@ -877,6 +1215,8 @@ function stopViewer() {
         if (viewer.dataChannel) {
             viewer.dataChannel = null;
         }
+
+        destroyViewerLiveDataChart();
 
         if (getFormValues().enableDQPmetrics) {
             chart.destroy();

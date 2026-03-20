@@ -469,6 +469,22 @@
                     </div>
                 </div>
             </div>
+            <div class="row viewer-live-data-row">
+                <div class="col">
+                    <div class="card bg-light mb-3">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center flex-wrap mb-2">
+                                <h5 class="mb-1">Live Data Plot</h5>
+                                <small id="viewer-live-data-status" class="text-muted">Waiting for timestamped data-channel measurements...</small>
+                            </div>
+                            <p class="text-muted mb-3">Plots the last minute of values grouped by <code>paramId</code>, uses the message <code>timestamp</code>, and shows per-message latency.</p>
+                            <div class="viewer-live-data-chart-container">
+                                <canvas id="viewer-live-data-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div>
                 <span class="send-message datachannel d-none">
                   <button type="button" class="btn btn-primary">Send DataChannel Message</button>

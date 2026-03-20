@@ -35,3 +35,19 @@ pre .warn {
 #subheader {
     margin-top: 30px;
 }
+
+.viewer-live-data-row {
+    margin-top: 0.5rem;
+}
+
+.viewer-live-data-chart-container {
+    height: 320px;
+}
+
+.datachannel .remote-message {
+    height: 6rem;
+    min-height: 6rem;
+    max-height: 6rem;
+    margin-bottom: 0;
+    overflow-y: auto;
+}
